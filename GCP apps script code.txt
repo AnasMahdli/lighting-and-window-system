@@ -1,0 +1,38 @@
+function doGet(e) {
+  try {
+    const projectId = 'iot-project-495717';
+    const datasetId = 'mechatronics_system';
+    const tableId = 'sensor_telemetry';
+    
+    const temp = Number(e.parameter.temp) || 0;
+    const ldr1 = Number(e.parameter.ldr1) || 0;
+    const ldr2 = Number(e.parameter.ldr2) || 0;
+    const led = Number(e.parameter.led) || 0;
+    const gas = Number(e.parameter.gas) || 0;
+    
+    const now = new Date();
+    const timestamp = now.toISOString().replace('T', ' ').split('.')[0]; 
+
+    const row = {
+      timestamp: timestamp,
+      temperature: temp,
+      ldr_outside: ldr1,
+      ldr_inside: ldr2,
+      led_status: led,
+      window_status: 0,
+      curtain_status: 0,
+      gas_level: gas
+    };
+
+    const insertRequest = {
+      rows: [{json: row}]
+    };
+    
+    BigQuery.Tabledata.insertAll(insertRequest, projectId, datasetId, tableId);
+    
+    return ContentService.createTextOutput("Success: BQ").setMimeType(ContentService.MimeType.TEXT);
+    
+  } catch (err) {
+    return ContentService.createTextOutput("Error: " + err.message).setMimeType(ContentService.MimeType.TEXT);
+  }
+}

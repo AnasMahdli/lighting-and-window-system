@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mechatronics 3D Digital Twin</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
+        
+        /* Floating UI Overlay */
+        #ui-panel {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(20, 20, 20, 0.85); color: white;
+            padding: 20px; border-radius: 8px; border: 1px solid #444;
+            pointer-events: auto; /* Allow clicking buttons */
+            backdrop-filter: blur(4px);
+            min-width: 200px;
+        }
+        h2 { margin: 0 0 10px 0; font-size: 18px; color: #4fc3f7; }
+        .data-row { margin: 5px 0; font-size: 14px; }
+        .val-highlight { font-weight: bold; color: #00e676; }
+        
+        /* Buttons */
+        .btn { 
+            width: 100%; padding: 8px; margin: 4px 0; border: none; border-radius: 4px; 
+            background-color: #333; color: white; cursor: pointer; font-size: 12px; font-weight: bold;
+            border: 1px solid #555; transition: 0.2s;
+        }
+        .btn:hover { background-color: #444; }
+        .btn-primary { background-color: #007acc; border-color: #005999; margin-bottom: 10px; }
+        .btn-primary:hover { background-color: #0098ff; }
+    </style>
+
+    <!-- Import Three.js and OrbitControls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+
+    <!-- Heads Up Display & Controls -->
+    <div id="ui-panel">
+        <h2>System Override Center</h2>
+        <div class="data-row">Status: <span id="ws-status" style="color: red;">Disconnected</span></div>
+        <div class="data-row" style="margin-bottom: 10px;">Mode: <span id="ui-mode" class="val-highlight">AUTO</span></div>
+        
+        <button class="btn btn-primary" onclick="sendCommand('auto_toggle')">Toggle Auto / Manual</button>
+        <button class="btn" onclick="sendCommand('fan_toggle')">Toggle Fan</button>
+        <button class="btn" onclick="sendCommand('window_toggle')">Toggle Window</button>
+        <button class="btn" onclick="sendCommand('curtain_toggle')">Toggle Curtain</button>
+        
+        <hr style="border-color: #444; margin: 15px 0;">
+        
+        <div class="data-row">Temp: <span id="ui-temp" class="val-highlight">-- °C</span></div>
+	<div class="data-row">Gas Lvl: <span id="ui-gas" class="val-highlight">-- %</span></div>
+	<div id="ui-emergency" style="color: #ff3333; font-weight: bold; background: #330000; padding: 5px; text-align: center; border-radius: 4px; display: none; margin-top: 10px; animation: blink 1s infinite;">⚠️ GAS LEAK DETECTED</div>
+
+<style>
+    @keyframes blink { 50% { opacity: 0.3; } }
+</style>
+        <div class="data-row">Lux: <span id="ui-lux" class="val-highlight">--</span></div>
+        <div class="data-row">Fan: <span id="ui-fan" style="color: #aaa;">OFF</span></div>
+        <div class="data-row">Window: <span id="ui-window" style="color: #aaa;">CLOSED</span></div>
+    </div>
+
+    <!-- 3D Canvas Container -->
+    <div id="canvas-container"></div>
+
+    <script>
+        // ==========================================
+        // 1. THREE.JS SCENE & FIRST-PERSON CAMERA
+        // ==========================================
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); 
+
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        // STAND INSIDE THE ROOM (Eye level in the center)
+        camera.position.set(0, 5, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        // Look slightly forward to create a First-Person pivot point
+        controls.target.set(0, 5, -0.1); 
+        controls.enableZoom = false; // Disable zooming out of the room
+        controls.enablePan = false;  // Disable moving the camera body
+        controls.enableDamping = true;
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const sunLight = new THREE.DirectionalLight(0xffddaa, 0.8);
+        sunLight.position.set(10, 20, -10);
+        scene.add(sunLight);
+
+        // ==========================================
+        // 2. BUILD THE ENCLOSED ROOM
+        // ==========================================
+        const wallMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, side: THREE.DoubleSide });
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x444444 });
+        const ceilingMat = new THREE.MeshStandardMaterial({ color: 0xeeeeee });
+        const fanMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+        const glassMat = new THREE.MeshStandardMaterial({ color: 0xaaddff, transparent: true, opacity: 0.5 });
+        const curtainMat = new THREE.MeshStandardMaterial({ color: 0x1976D2, side: THREE.DoubleSide });
+
+        // Floor & Ceiling (20x20)
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        scene.add(floor);
+        
+        const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), ceilingMat);
+        ceiling.rotation.x = Math.PI / 2;
+        ceiling.position.y = 10;
+        scene.add(ceiling);
+
+        // 4 Walls to enclose the user
+        const backWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMat);
+        backWall.position.set(0, 5, -10);
+        scene.add(backWall);
+
+        const frontWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMat);
+        frontWall.position.set(0, 5, 10);
+        frontWall.rotation.y = Math.PI;
+        scene.add(frontWall);
+
+        const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMat);
+        leftWall.position.set(-10, 5, 0);
+        leftWall.rotation.y = Math.PI / 2;
+        scene.add(leftWall);
+
+        const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMat);
+        rightWall.position.set(10, 5, 0);
+        rightWall.rotation.y = -Math.PI / 2;
+        scene.add(rightWall);
+
+        // The Ceiling Fan
+        const fanGroup = new THREE.Group();
+        fanGroup.position.set(0, 9.5, 0); 
+        const fanMotor = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 1, 16), fanMat);
+        fanGroup.add(fanMotor);
+        for(let i=0; i<4; i++) {
+            const blade = new THREE.Mesh(new THREE.BoxGeometry(3, 0.1, 0.5), fanMat);
+            blade.position.x = 1.5; 
+            const pivot = new THREE.Group();
+            pivot.rotation.y = (Math.PI / 2) * i;
+            pivot.add(blade);
+            fanGroup.add(pivot);
+        }
+        scene.add(fanGroup);
+
+        // The Window (Mounted on back wall)
+        // Cut a hole in the visual wall by placing a black box behind the glass
+        // Load Local Textures (No internet required)
+	const textureLoader = new THREE.TextureLoader();
+
+	// Load with Callbacks to force a refresh
+	const dayTexture = textureLoader.load('./day.jpg', function ( texture ) {
+	    sceneryMesh.material.map = texture;
+	    sceneryMesh.material.needsUpdate = true;
+	});
+
+	const nightTexture = textureLoader.load('./night.jpg', function ( texture ) {
+	    // We don't map this yet, just pre-load it into memory
+	    texture.needsUpdate = true; 
+	});
+
+	const sceneryGeo = new THREE.PlaneGeometry(3.6, 3.6);
+	// Add Side: DoubleSide just in case the plane is facing away from the camera
+	const sceneryMat = new THREE.MeshBasicMaterial({ 
+	    map: dayTexture, 
+	    side: THREE.DoubleSide 
+	});
+	const sceneryMesh = new THREE.Mesh(sceneryGeo, sceneryMat);
+	sceneryMesh.position.set(0, 5, -9.9);
+	scene.add(sceneryMesh);
+
+        const windowGlass = new THREE.Mesh(new THREE.PlaneGeometry(3.6, 3.6), glassMat);
+        windowGlass.position.set(0, 5, -9.8);
+        //scene.add(windowGlass);
+
+        // The Curtain
+        const curtainGeometry = new THREE.PlaneGeometry(4.5, 4.5);
+        curtainGeometry.translate(-2.25, 0, 0); 
+        const curtainMesh = new THREE.Mesh(curtainGeometry, curtainMat);
+        curtainMesh.position.set(2.25, 5, -9.5); 
+        scene.add(curtainMesh);
+
+        // ==========================================
+        // 3. HARDWARE STATE VARIABLES
+        // ==========================================
+        let isFanRunning = false;
+        let isWindowOpen = false;
+        let isCurtainOpen = false;
+        let isDaytime = true;
+
+        // ==========================================
+        // 4. ANIMATION LOOP
+        // ==========================================
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isFanRunning) fanGroup.rotation.y -= 0.15; 
+
+            const targetGlassY = isWindowOpen ? 8.5 : 5; 
+            windowGlass.position.y += (targetGlassY - windowGlass.position.y) * 0.05;
+
+            const targetCurtainScale = isCurtainOpen ? 0.1 : 1.0;
+            curtainMesh.scale.x += (targetCurtainScale - curtainMesh.scale.x) * 0.05;
+
+            
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate(); 
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ==========================================
+        // 5. WEBSOCKET LOGIC
+        // ==========================================
+        const ws = new WebSocket('PASTE-YOUR-WEBSOCKET-URL-HERE');
+
+        ws.onopen = () => {
+            document.getElementById('ws-status').innerText = 'Connected';
+            document.getElementById('ws-status').style.color = '#00e676';
+            ws.send(JSON.stringify({ type: 'register', device: 'web' }));
+        };
+
+        ws.onclose = () => {
+            document.getElementById('ws-status').innerText = 'Disconnected';
+            document.getElementById('ws-status').style.color = 'red';
+        };
+
+        // Send Commands from Buttons
+        function sendCommand(action) {
+	    const payload = { type: 'command', action: action };
+	    ws.send(JSON.stringify(payload));
+
+	    // Optimistic UI: Start moving the 3D models immediately if in manual mode
+	    if (document.getElementById('ui-mode').innerText === 'MANUAL') {
+	        if (action === 'window_toggle') isWindowOpen = !isWindowOpen;
+	        if (action === 'curtain_toggle') isCurtainOpen = !isCurtainOpen;
+	        if (action === 'fan_toggle') isFanRunning = !isFanRunning;
+	    }
+	}
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'telemetry') {
+                document.getElementById('ui-temp').innerText = data.temp.toFixed(1) + ' °C';
+
+		// Display Gas Percentage
+		document.getElementById('ui-gas').innerText = data.gas.toFixed(1) + ' %';
+
+		// Trigger Emergency Visuals
+		const emergencyBanner = document.getElementById('ui-emergency');
+		if (data.emergency === true) {
+		    emergencyBanner.style.display = 'block';
+		    document.getElementById('ui-gas').style.color = '#ff3333';
+		} else {
+		    emergencyBanner.style.display = 'none';
+		    document.getElementById('ui-gas').style.color = '#00e676';
+		}
+                
+                let lux = Math.max(0, Math.round(((4095 - data.ldr1) / (4095 - 400)) * 300));
+                document.getElementById('ui-lux').innerText = lux;
+                
+                // Sync State Variables
+                isDaytime = (data.ldr1 <= 2000);
+                if (isDaytime && dayTexture) {
+		    sceneryMesh.material.map = dayTexture;
+		    sceneryMesh.material.needsUpdate = true;
+		} else if (!isDaytime && nightTexture) {
+		    sceneryMesh.material.map = nightTexture;
+		    sceneryMesh.material.needsUpdate = true;
+		}
+                isFanRunning = (data.fan === 1);
+                isWindowOpen = (data.window === 1);
+		isCurtainOpen = (data.curtain === 1);
+                
+                // We'll map the curtain state to auto-mode if available, or just LDR for now
+                // Only let the ESP32 drive the curtain position
+		if (data.curtain !== undefined) {
+		    isCurtainOpen = (data.curtain === 1);
+		}
+                // Update UI Text
+                const modeText = document.getElementById('ui-mode');
+                if (data.auto === true) {
+                    modeText.innerText = 'AUTO';
+                    modeText.style.color = '#007acc';
+                } else {
+                    modeText.innerText = 'MANUAL';
+                    modeText.style.color = '#d84315';
+                }
+
+                const fanText = document.getElementById('ui-fan');
+                fanText.innerText = isFanRunning ? 'ON' : 'OFF';
+                fanText.style.color = isFanRunning ? '#00e676' : '#aaa';
+
+                const winText = document.getElementById('ui-window');
+                winText.innerText = isWindowOpen ? 'OPEN' : 'CLOSED';
+                winText.style.color = isWindowOpen ? '#87CEEB' : '#aaa';
+            }
+        };
+    </script>
+</body>
+</html>

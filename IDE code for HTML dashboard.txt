@@ -1,0 +1,319 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <WebSocketsClient.h>
+#include <ArduinoJson.h>
+#include "DHT.h"
+
+// --- Network & Server Config ---
+const char *WIFI_SSID = "WIFI-NAME-HERE";      
+const char *WIFI_PASS = "WIFI-PASSWD-HERE";      
+
+// Google Apps Script Web App URL
+const char *script_url = "GOOGLE-APPS-SCRIPT-WEBAPP-URL-TO-TRANSLATE-ESP-TELEMETRY-TO-GCP-HERE";
+
+// --- Hardware Pins ---
+const int ldr1Pin = 34;
+const int ldr2Pin = 35;
+const int dhtPin = 32;
+const int pirPin = 25;
+const int mq5Pin = 33; 
+const int ledPin = 2;
+const int winIn1 = 26;
+const int winIn2 = 27;
+const int curtainIn1 = 18;
+const int curtainIn2 = 19;
+const int fanInA = 22;
+const int fanInB = 23;
+
+const int ldrThreshold = 2000;
+
+// --- Network Timers ---
+const int WEBSOCKET_FREQ = 2000; 
+const int GCP_FREQ = 60000;      
+unsigned long webSocketTimer = 0;
+unsigned long gcpTimer = 0;
+
+DHT dht(dhtPin, DHT22);
+WebSocketsClient webSocket;
+
+// --- Hardware State Variables ---
+unsigned long motionStartTime = 0;
+unsigned long windowTimer = 0;
+unsigned long curtainTimer = 0;
+
+bool ledActive = false;
+int windowState = 0;
+bool windowMoving = false;
+int curtainState = 0;
+bool curtainMoving = false;
+bool autoMode = true;
+int fanState = 0; 
+
+// --- Gas Sensor Variables ---
+float gasPercentage = 0.0;
+bool gasEmergency = false;
+
+// --- WebSocket Event Handler ---
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.println("[WS] Disconnected from broker.");
+      break;
+    case WStype_CONNECTED:
+      Serial.println("[WS] Connected to broker!");
+      webSocket.sendTXT("{\"type\":\"register\",\"device\":\"esp32\"}");
+      break;
+    case WStype_TEXT:
+      StaticJsonDocument<200> doc;
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (!error && doc["type"] == "command") {
+        String action = doc["action"];
+        
+        if (action == "auto_toggle") {
+          autoMode = !autoMode;
+          Serial.println(autoMode ? "ACTION: Switched to AUTO Mode" : "ACTION: Switched to MANUAL Mode");
+        
+        } else if (action == "window_toggle" && !autoMode && !windowMoving) {
+          if (gasEmergency) {
+            Serial.println("BLOCKED: Cannot operate window manually during gas emergency!");
+          } else {
+            windowMoving = true;
+            windowTimer = millis();
+            digitalWrite(winIn1, (windowState == 0) ? HIGH : LOW); 
+            digitalWrite(winIn2, (windowState == 0) ? LOW : HIGH); 
+          }
+        
+        } else if (action == "curtain_toggle" && !autoMode && !curtainMoving) {
+          if (gasEmergency) {
+            Serial.println("BLOCKED: Cannot operate curtain manually during gas emergency!");
+          } else {
+            curtainMoving = true;
+            curtainTimer = millis();
+            digitalWrite(curtainIn1, (curtainState == 0) ? HIGH : LOW); 
+            digitalWrite(curtainIn2, (curtainState == 0) ? LOW : HIGH);
+          }
+        
+        } else if (action == "fan_toggle" && !autoMode) {
+          if (gasEmergency) {
+             Serial.println("BLOCKED: Cannot turn off fan during gas emergency!");
+          } else {
+            fanState = (fanState == 0) ? 1 : 0;
+            digitalWrite(fanInA, fanState == 1 ? HIGH : LOW);
+            digitalWrite(fanInB, LOW);
+            Serial.println("ACTION: Toggling Fan");
+          }
+        }
+      }
+      break;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(ldr1Pin, INPUT);
+  pinMode(ldr2Pin, INPUT);
+  pinMode(pirPin, INPUT);
+  pinMode(mq5Pin, INPUT);
+  pinMode(ledPin, OUTPUT);
+  pinMode(winIn1, OUTPUT);
+  pinMode(winIn2, OUTPUT);
+  pinMode(curtainIn1, OUTPUT);
+  pinMode(curtainIn2, OUTPUT);
+  pinMode(fanInA, OUTPUT);
+  pinMode(fanInB, OUTPUT);
+
+  dht.begin();
+  
+  Serial.print("Connecting to Wi-Fi");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWi-Fi Connected.");
+
+  webSocket.setExtraHeaders("ngrok-skip-browser-warning: true");
+  webSocket.beginSSL("PASTE-YOUR-WEBSOCKET-URL-HERE", 443, "/");
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(5000); 
+
+  webSocketTimer = millis();
+  gcpTimer = millis();
+}
+
+void loop() {
+  webSocket.loop();
+
+  int ldr1Value = analogRead(ldr1Pin);
+  int ldr2Value = analogRead(ldr2Pin);
+  int pirState = digitalRead(pirPin);
+  float temp = dht.readTemperature();
+  
+  // Read and calculate Gas Percentage
+  int mq5Value = analogRead(mq5Pin);
+  gasPercentage = (mq5Value / 4095.0) * 100.0;
+
+  // ==========================================
+  // ABSOLUTE OVERRIDE: GAS EMERGENCY
+  // ==========================================
+  // HYSTERESIS: Trigger at 60%, hold emergency state until it drops to 40%
+  if (gasPercentage > 60.0) {
+    gasEmergency = true;
+  } else if (gasPercentage < 40.0) {
+    gasEmergency = false;
+  }
+
+  if (gasEmergency) {
+    // 1. Force Fan ON
+    if (fanState == 0) {
+      fanState = 1;
+      digitalWrite(fanInA, HIGH);
+      digitalWrite(fanInB, LOW);
+      Serial.println("EMERGENCY: Fan forced ON.");
+    }
+    
+    // 2. Force Window OPEN
+    if (windowState == 0 && !windowMoving) {
+      digitalWrite(winIn1, HIGH); 
+      digitalWrite(winIn2, LOW);
+      windowMoving = true; 
+      windowTimer = millis();
+      Serial.println("EMERGENCY: Window forced OPEN.");
+    }
+
+    // 3. Force Curtain OPEN
+    if (curtainState == 0 && !curtainMoving) {
+      digitalWrite(curtainIn1, HIGH); 
+      digitalWrite(curtainIn2, LOW);
+      curtainMoving = true; 
+      curtainTimer = millis();
+      Serial.println("EMERGENCY: Curtain forced OPEN.");
+    }
+  }
+
+  // --- Local Lighting Logic ---
+  if (ldr1Value > ldrThreshold && pirState == HIGH) {
+    digitalWrite(ledPin, HIGH);
+    ledActive = true;
+    motionStartTime = millis();
+  }
+  if (ledActive && (millis() - motionStartTime >= 60000)) {
+    digitalWrite(ledPin, LOW);
+    ledActive = false;
+  }
+  if (ldr1Value <= ldrThreshold && ledActive) {
+    digitalWrite(ledPin, LOW);
+    ledActive = false;
+  }
+
+  // --- Auto Mode Logic (COMPLETELY BYPASSED DURING EMERGENCY) ---
+  if (autoMode && !gasEmergency) {
+    bool targetWindowOpen = (!isnan(temp) && temp > 30.0);
+    bool targetCurtainOpen = (ldr1Value <= ldrThreshold);
+
+    if (targetWindowOpen && windowState == 0 && !windowMoving) {
+      digitalWrite(winIn1, HIGH); digitalWrite(winIn2, LOW);
+      windowMoving = true; windowTimer = millis();
+    } else if (!targetWindowOpen && windowState == 1 && !windowMoving) {
+      digitalWrite(winIn1, LOW); digitalWrite(winIn2, HIGH);
+      windowMoving = true; windowTimer = millis();
+    }
+
+    if (targetCurtainOpen && curtainState == 0 && !curtainMoving) {
+      digitalWrite(curtainIn1, HIGH); digitalWrite(curtainIn2, LOW);
+      curtainMoving = true; curtainTimer = millis();
+    } else if (!targetCurtainOpen && curtainState == 1 && !curtainMoving) {
+      digitalWrite(curtainIn1, LOW); digitalWrite(curtainIn2, HIGH);
+      curtainMoving = true; curtainTimer = millis();
+    }
+
+    if (!isnan(temp)) {
+      if (temp > 30.0 && fanState == 0) {
+        fanState = 1;
+        digitalWrite(fanInA, HIGH);
+        digitalWrite(fanInB, LOW);
+      } else if (temp <= 30.0 && fanState == 1) {
+        fanState = 0; 
+        digitalWrite(fanInA, LOW);
+        digitalWrite(fanInB, LOW);
+      }
+    }
+  }
+
+  // --- Hardware Timers ---
+  if (windowMoving) {
+    if (millis() - windowTimer >= ((windowState == 1) ? 125 : 200)) {
+      digitalWrite(winIn1, LOW); 
+      digitalWrite(winIn2, LOW);
+      windowMoving = false;
+      windowState = (windowState == 0) ? 1 : 0; 
+    }
+  }
+
+  if (curtainMoving) {
+    if (millis() - curtainTimer >= 300) {
+      digitalWrite(curtainIn1, LOW); 
+      digitalWrite(curtainIn2, LOW);
+      curtainMoving = false;
+      curtainState = (curtainState == 0) ? 1 : 0; 
+    }
+  }
+
+  // ==========================================
+  // PIPELINE 1: Live Telemetry
+  // ==========================================
+  if (millis() - webSocketTimer > WEBSOCKET_FREQ) {
+    if (webSocket.isConnected()) {
+      StaticJsonDocument<200> doc;
+      doc["type"] = "telemetry";
+      doc["temp"] = isnan(temp) ? 0.0 : temp;
+      doc["ldr1"] = ldr1Value;
+      doc["ldr2"] = ldr2Value;
+      doc["auto"] = autoMode;
+      doc["window"] = windowState;
+      doc["fan"] = fanState;
+      doc["curtain"] = curtainState;
+      doc["gas"] = gasPercentage;       
+      doc["emergency"] = gasEmergency;  
+
+      String payload;
+      serializeJson(doc, payload);
+      webSocket.sendTXT(payload);
+    }
+    webSocketTimer = millis();
+  }
+
+  // ==========================================
+  // PIPELINE 2: BigQuery Logging
+  // ==========================================
+  if (millis() - gcpTimer > GCP_FREQ) {
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFiClientSecure client; 
+      client.setInsecure(); 
+      HTTPClient http;
+      
+      char urlBuffer[350]; 
+      float safeTemp = isnan(temp) ? 0.00 : temp;
+      
+      snprintf(urlBuffer, sizeof(urlBuffer), "%s?temp=%.2f&ldr1=%d&ldr2=%d&led=%d&gas=%.2f", 
+               script_url, safeTemp, ldr1Value, ldr2Value, ledActive ? 1 : 0, gasPercentage);
+
+      http.begin(client, urlBuffer); 
+      http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+      int httpResponseCode = http.GET();
+      
+      if (httpResponseCode > 0) {
+        Serial.print("[GCP] Success! Code: ");
+        Serial.println(httpResponseCode);
+      } else {
+        Serial.print("[GCP] Error: ");
+        Serial.println(http.errorToString(httpResponseCode).c_str());
+      }
+      http.end(); 
+    }
+    gcpTimer = millis(); 
+  }
+}

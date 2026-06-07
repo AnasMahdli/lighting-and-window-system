@@ -1,0 +1,269 @@
+#include "UbidotsEsp32Mqtt.h"
+#include "DHT.h"
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+const char *UBIDOTS_TOKEN = "UBIDOTS-TOKEN-HERE"; 
+const char *WIFI_SSID = "WIFI-NAME-HERE";      
+const char *WIFI_PASS = "WIFI-PASSWD-HERE";      
+const char *DEVICE_LABEL = "UBIDOTS-DEVICE-NAME-HERE";   
+const char *script_url = "GOOGLE-APPS-SCRIPT-WEBAPP-URL-TO-TRANSLATE-ESP-TELEMETRY-TO-GCP-HERE";
+
+const int PUBLISH_FREQUENCY = 5000; 
+const int GCP_FREQ = 60000; 
+
+const int ldr1Pin = 34;
+const int ldr2Pin = 35;
+const int dhtPin = 32;
+const int pirPin = 25;
+const int mq5Pin = 33;
+const int ledPin = 2;
+const int winIn1 = 26;
+const int winIn2 = 27;
+const int curtainIn1 = 18;
+const int curtainIn2 = 19;
+const int fanInA = 22;
+const int fanInB = 23;
+
+const int ldrThreshold = 2000;
+
+DHT dht(dhtPin, DHT22);
+Ubidots ubidots(UBIDOTS_TOKEN);
+
+unsigned long mqttTimer;
+unsigned long gcpTimer;
+unsigned long motionStartTime;
+unsigned long windowTimer;
+unsigned long curtainTimer;
+
+bool ledActive = false;
+int windowState = 0;
+bool windowMoving = false;
+int curtainState = 0;
+bool curtainMoving = false;
+int fanState = 0;
+
+float gasPercentage = 0.0;
+bool gasEmergency = false;
+
+bool autoMode = true;
+bool manualWindowCmd = false;
+bool manualCurtainCmd = false;
+bool manualFanCmd = false;
+
+void callback(char *topic, byte *payload, unsigned int length) {
+  String payloadStr;
+  for (int i = 0; i < length; i++) {
+    payloadStr += (char)payload[i];
+  }
+
+  float val = payloadStr.toFloat();
+  String topicStr = String(topic);
+
+  if (topicStr.indexOf("system-mode") > 0) {
+    autoMode = (val == 1.0);
+  } else if (topicStr.indexOf("window-control") > 0) {
+    manualWindowCmd = (val == 1.0);
+  } else if (topicStr.indexOf("curtain-control") > 0) {
+    manualCurtainCmd = (val == 1.0);
+  } else if (topicStr.indexOf("fan-control") > 0) {
+    manualFanCmd = (val == 1.0);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(ldr1Pin, INPUT);
+  pinMode(ldr2Pin, INPUT);
+  pinMode(pirPin, INPUT);
+  pinMode(mq5Pin, INPUT);
+  pinMode(ledPin, OUTPUT);
+  pinMode(winIn1, OUTPUT);
+  pinMode(winIn2, OUTPUT);
+  pinMode(curtainIn1, OUTPUT);
+  pinMode(curtainIn2, OUTPUT);
+  pinMode(fanInA, OUTPUT);
+  pinMode(fanInB, OUTPUT);
+
+  dht.begin();
+  
+  ubidots.connectToWifi(WIFI_SSID, WIFI_PASS);
+  ubidots.setCallback(callback);
+  ubidots.setup();
+  ubidots.reconnect();
+
+  ubidots.subscribe("/v2.0/devices/esp32-system/system-mode/lv");
+  ubidots.subscribe("/v2.0/devices/esp32-system/window-control/lv");
+  ubidots.subscribe("/v2.0/devices/esp32-system/curtain-control/lv");
+  ubidots.subscribe("/v2.0/devices/esp32-system/fan-control/lv");
+
+  mqttTimer = millis();
+  gcpTimer = millis();
+}
+
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    autoMode = true;
+    static unsigned long lastWifiAttempt = 0;
+    if (millis() - lastWifiAttempt > 10000) {
+      WiFi.reconnect();
+      lastWifiAttempt = millis();
+    }
+  } else {
+    if (!ubidots.connected()) {
+      autoMode = true;
+      static unsigned long lastReconnectAttempt = 0;
+      if (millis() - lastReconnectAttempt > 5000) {
+        ubidots.reconnect();
+        ubidots.subscribe("/v2.0/devices/esp32-system/system-mode/lv");
+        ubidots.subscribe("/v2.0/devices/esp32-system/window-control/lv");
+        ubidots.subscribe("/v2.0/devices/esp32-system/curtain-control/lv");
+        ubidots.subscribe("/v2.0/devices/esp32-system/fan-control/lv");
+        lastReconnectAttempt = millis();
+      }
+    } else {
+      ubidots.loop();
+    }
+  }
+
+  int ldr1Value = analogRead(ldr1Pin);
+  int ldr2Value = analogRead(ldr2Pin);
+  int pirState = digitalRead(pirPin);
+  float temp = dht.readTemperature();
+  
+  int mq5Value = analogRead(mq5Pin);
+  gasPercentage = (mq5Value / 4095.0) * 100.0;
+
+  if (gasPercentage > 60.0) {
+    gasEmergency = true;
+  } else if (gasPercentage < 40.0) {
+    gasEmergency = false;
+  }
+
+  if (ldr1Value > ldrThreshold && pirState == HIGH) {
+    digitalWrite(ledPin, HIGH);
+    ledActive = true;
+    motionStartTime = millis();
+  }
+  
+  if (ledActive && (millis() - motionStartTime >= 60000)) {
+    digitalWrite(ledPin, LOW);
+    ledActive = false;
+  }
+  
+  if (ldr1Value <= ldrThreshold && ledActive) {
+    digitalWrite(ledPin, LOW);
+    ledActive = false;
+  }
+
+  bool targetWindowOpen = false;
+  bool targetCurtainOpen = false;
+  int targetFanState = 0;
+
+  if (gasEmergency) {
+    targetWindowOpen = true;
+    targetCurtainOpen = true;
+    targetFanState = 1;
+  } else if (autoMode) {
+    targetWindowOpen = (!isnan(temp) && temp > 30.0);
+    targetCurtainOpen = (ldr1Value <= ldrThreshold);
+    targetFanState = (!isnan(temp) && temp > 30.0) ? 1 : 0;
+  } else {
+    targetWindowOpen = manualWindowCmd;
+    targetCurtainOpen = manualCurtainCmd;
+    targetFanState = manualFanCmd ? 1 : 0;
+  }
+
+  if (fanState != targetFanState) {
+    fanState = targetFanState;
+    digitalWrite(fanInA, fanState == 1 ? HIGH : LOW);
+    digitalWrite(fanInB, LOW);
+  }
+
+  if (targetWindowOpen && windowState == 0 && !windowMoving) {
+    digitalWrite(winIn1, HIGH); 
+    digitalWrite(winIn2, LOW);
+    windowMoving = true; 
+    windowTimer = millis();
+  } else if (!targetWindowOpen && windowState == 1 && !windowMoving) {
+    digitalWrite(winIn1, LOW); 
+    digitalWrite(winIn2, HIGH);
+    windowMoving = true; 
+    windowTimer = millis();
+  }
+
+  if (targetCurtainOpen && curtainState == 0 && !curtainMoving) {
+    digitalWrite(curtainIn1, HIGH); 
+    digitalWrite(curtainIn2, LOW);
+    curtainMoving = true; 
+    curtainTimer = millis();
+  } else if (!targetCurtainOpen && curtainState == 1 && !curtainMoving) {
+    digitalWrite(curtainIn1, LOW); 
+    digitalWrite(curtainIn2, HIGH);
+    curtainMoving = true; 
+    curtainTimer = millis();
+  }
+
+  if (windowMoving) {
+    unsigned long moveTime = (windowState == 0) ? 125 : 200;
+    if (millis() - windowTimer >= moveTime) {
+      digitalWrite(winIn1, LOW);
+      digitalWrite(winIn2, LOW);
+      windowMoving = false;
+      windowState = (windowState == 0) ? 1 : 0;
+    }
+  }
+
+  if (curtainMoving) {
+    if (millis() - curtainTimer >= 300) {
+      digitalWrite(curtainIn1, LOW);
+      digitalWrite(curtainIn2, LOW);
+      curtainMoving = false;
+      curtainState = (curtainState == 0) ? 1 : 0;
+    }
+  }
+
+  if (millis() - mqttTimer > PUBLISH_FREQUENCY) {
+    if (ubidots.connected()) {
+      ubidots.add("ldr-outside", ldr1Value);
+      ubidots.add("temperature", isnan(temp) ? 0.0 : temp);
+      ubidots.add("gas-level", gasPercentage);
+      ubidots.publish(DEVICE_LABEL);
+
+      ubidots.add("window-status", windowState);
+      ubidots.add("curtain-status", curtainState);
+      ubidots.add("fan-status", fanState);
+      ubidots.publish(DEVICE_LABEL);
+    }
+    mqttTimer = millis();
+  }
+
+  if (millis() - gcpTimer > GCP_FREQ) {
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFiClientSecure client; 
+      client.setInsecure(); 
+      HTTPClient http;
+      
+      char urlBuffer[350]; 
+      float safeTemp = isnan(temp) ? 0.00 : temp;
+      
+      snprintf(urlBuffer, sizeof(urlBuffer), "%s?temp=%.2f&ldr1=%d&ldr2=%d&led=%d&gas=%.2f", 
+               script_url, safeTemp, ldr1Value, ldr2Value, ledActive ? 1 : 0, gasPercentage);
+
+      http.begin(client, urlBuffer); 
+      http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+      int httpResponseCode = http.GET();
+      
+      if (httpResponseCode > 0) {
+        String responseBody = http.getString(); 
+        Serial.print(httpResponseCode);
+        Serial.print(responseBody);
+      } else {
+        Serial.print(http.errorToString(httpResponseCode).c_str());
+      }
+      http.end(); 
+    }
+    gcpTimer = millis(); 
+  }
+}

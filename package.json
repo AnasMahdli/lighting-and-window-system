@@ -1,0 +1,25 @@
+{
+  "name": "websocket",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "ws": "^8.20.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AnasMahdli/mechatronics-broker.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AnasMahdli/mechatronics-broker/issues"
+  },
+  "homepage": "https://github.com/AnasMahdli/mechatronics-broker#readme"
+}
