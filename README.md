@@ -1,45 +1,107 @@
-Hardware Setup:---------------------------------------------------
+# Setup Guide
 
-Connect a 12V 2A adapter to power complete system, motors are connected directly to the adapter,
-and use a buck converter to step down the voltage to 5V to power everything else
+---
 
+## ⚙️ Hardware Setup
 
-Software Setup:---------------------------------------------------
+Connect a **12V 2A adapter** to power the complete system.
 
-Install Arduino Libraries (ArduinoJson by benoit Blanchon), (Websockets by Markus Sattler), (DHT sensor library by Adafruit)
+- The motor drivers (**L298N**) are connected directly to the **12V supply** to prevent brownouts during heavy loads.
+- Use a **buck converter** to step down the voltage to **5V** to safely power the ESP32 and the sensor suite (DHT22, LDRs, PIR, MQ5).
 
-Add the network SSID and Password to the code so the ESP can connect to the internet and replace 
-the GCP WebApp URL with yours to connect to the google cloud platform and do not forget to add the variables
-in BigQuery Studio 
+---
 
+## 💻 Software Setup
 
-Ubidots Setup:-----------------------------------------------------
+### Required Libraries
 
-To use the Ubidots dashboard, simply copy your Ubidots credentials(Default token and device name) to the code 
-and add system-mode, fan-control, curtain-control, window-control topics as raw variables to send to the ESP
+Install the following libraries in your **Arduino IDE**:
 
+| Library | Author |
+|---|---|
+| `ArduinoJson` | Benoit Blanchon |
+| `WebSockets` | Markus Sattler |
+| `DHT sensor library` | Adafruit |
+| `UbidotsEsp32Mqtt` | Ubidots |
 
-Websocket Setup:-------------------------------------------------
+### Cloud Configuration
 
-To use the 3D dashboard, first download latest LTS node.js from nodejs.org
+1. Add your Wi-Fi **`SSID`** and **`Password`** to the ESP32 code.
+2. Replace the GCP WebApp URL with your specific **Google Apps Script deployment URL**.
+   > **Note:** If you update your Apps Script code, you must publish a **"New Deployment"** for the changes to take effect.
+3. Ensure your **BigQuery Studio** table schema exactly matches the variable names in your payload (e.g., set `gas_level` to `FLOAT`).
 
-download ngrok, extract and run auth token(found in ngrok dashboard) in command terminal
- 
-open the command prompt in the project folder and run (npm install), if it does not work then run (npm install ws)
+---
 
-open a new terminal(1) in project folder and run (node server.js)
+## ☁️ Ubidots Setup (MQTT)
 
-open a new terminal(2) in project folder and run (npx http-server)
+To utilize the cloud dashboard:
 
-open the ngrok terminal(3) and run (ngrok http 8080)
+1. Copy your **Ubidots Token** and **Device Name** into the ESP32 code.
+2. In your Ubidots Dashboard, create a new device and add the following raw variables:
+   - `system-mode`
+   - `fan-control`
+   - `curtain-control`
+   - `window-control`
+3. Link these variables to **toggle switches** on your dashboard. These will publish commands to the ESP32 via the MQTT `/lv` (Last Value) topics.
 
+---
 
-now in the ngrok terminal you should find a websocket url similar to this (wss://new-random-words.ngrok-free.dev), 
-copy this link and paste it in the 3d-dashboard.html file and the esp32 code too but remove the "wss://" prefix so put only the 
-"new-random-words.ngrok-free.dev" part of the URL
+## 🌐 WebSocket Setup (3D Digital Twin)
 
-then in your browser open http://127.0.0.1:8080/3d-dashboard.html and the dashboard should be visible and update in realtime
+To run the local First-Person 3D Control Room:
 
+### Prerequisites
 
+1. Download and install the latest **LTS version of Node.js** from [nodejs.org](https://nodejs.org).
+2. Download **Ngrok**, extract it, and authenticate your token via the command terminal.
 
-----------------------------GoodLuck:)----------------------------
+### Installation
+
+Open a command prompt in your project folder and install the required dependencies:
+
+```bash
+npm install ws
+```
+
+### Running the Servers
+
+You will need **three separate terminals** open in your project folder.
+
+**Terminal 1 — Start the WebSocket Broker:**
+
+```bash
+node server.js
+```
+
+**Terminal 2 — Host the 3D Files:**
+
+> Note the port used — typically `8081` if `8080` is already taken by the broker.
+
+```bash
+npx http-server -p 8081
+```
+
+**Terminal 3 — Expose the WebSocket Broker via Ngrok:**
+
+```bash
+ngrok http 8080
+```
+
+### Connecting the Digital Twin
+
+1. Ngrok will generate a **forwarding URL** in Terminal 3.
+2. In your `3d-dashboard.html` file, update the WebSocket connection using the `wss://` prefix:
+   ```
+   wss://new-random-words.ngrok-free.dev
+   ```
+3. In your **ESP32 code**, paste the exact same URL but **remove the prefix**:
+   ```
+   new-random-words.ngrok-free.dev
+   ```
+4. Open your browser and navigate to:
+   ```
+   http://127.0.0.1:8081/3d-dashboard.html
+   ```
+
+The 3D environment should now render and sync with your physical hardware in real-time. 🚀
