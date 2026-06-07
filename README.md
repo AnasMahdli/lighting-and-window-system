@@ -1,0 +1,45 @@
+Hardware Setup:---------------------------------------------------
+
+Connect a 12V 2A adapter to power complete system, motors are connected directly to the adapter,
+and use a buck converter to step down the voltage to 5V to power everything else
+
+
+Software Setup:---------------------------------------------------
+
+Install Arduino Libraries (ArduinoJson by benoit Blanchon), (Websockets by Markus Sattler), (DHT sensor library by Adafruit)
+
+Add the network SSID and Password to the code so the ESP can connect to the internet and replace 
+the GCP WebApp URL with yours to connect to the google cloud platform and do not forget to add the variables
+in BigQuery Studio 
+
+
+Ubidots Setup:-----------------------------------------------------
+
+To use the Ubidots dashboard, simply copy your Ubidots credentials(Default token and device name) to the code 
+and add system-mode, fan-control, curtain-control, window-control topics as raw variables to send to the ESP
+
+
+Websocket Setup:-------------------------------------------------
+
+To use the 3D dashboard, first download latest LTS node.js from nodejs.org
+
+download ngrok, extract and run auth token(found in ngrok dashboard) in command terminal
+ 
+open the command prompt in the project folder and run (npm install), if it does not work then run (npm install ws)
+
+open a new terminal(1) in project folder and run (node server.js)
+
+open a new terminal(2) in project folder and run (npx http-server)
+
+open the ngrok terminal(3) and run (ngrok http 8080)
+
+
+now in the ngrok terminal you should find a websocket url similar to this (wss://new-random-words.ngrok-free.dev), 
+copy this link and paste it in the 3d-dashboard.html file and the esp32 code too but remove the "wss://" prefix so put only the 
+"new-random-words.ngrok-free.dev" part of the URL
+
+then in your browser open http://127.0.0.1:8080/3d-dashboard.html and the dashboard should be visible and update in realtime
+
+
+
+----------------------------GoodLuck:)----------------------------
